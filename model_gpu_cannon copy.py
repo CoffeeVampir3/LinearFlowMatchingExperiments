@@ -3,7 +3,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as transforms
 from datasets import load_dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
+from schedulefree import AdamWScheduleFree
 
 class VectorField(nn.Module):
     def __init__(self, image_dim, hidden_dim=128, dropout=0.1):
@@ -58,8 +59,10 @@ class VectorField(nn.Module):
         
         return out
 
-def get_dataloader(batch_size=128, image_size=128):
-    dataset = load_dataset("huggan/smithsonian_butterflies_subset", split="train")
+def preload_dataset(image_size=128, device="cuda"):
+    """Preload and cache the entire dataset in GPU memory"""
+    print("Loading and preprocessing dataset...")
+    dataset = load_dataset("ceyda/smithsonian_butterflies", split="train")
     
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -67,50 +70,59 @@ def get_dataloader(batch_size=128, image_size=128):
         transforms.Lambda(lambda x: (x * 2) - 1)  # Scale to [-1, 1]
     ])
     
-    def preprocess(examples):
-        images = [transform(image.convert('RGB')) for image in examples['image']]
-        return {'pixel_values': torch.stack(images)}
+    # Process all images at once
+    all_images = []
+    for example in dataset:
+        img_tensor = transform(example['image'].convert('RGB'))
+        all_images.append(img_tensor)
     
-    dataset = dataset.with_transform(preprocess)
+    # Stack all images into a single tensor and move to GPU
+    images_tensor = torch.stack(all_images).to(device)
+    print(f"Dataset loaded: {images_tensor.shape} ({images_tensor.element_size() * images_tensor.nelement() / 1024/1024:.2f} MB)")
     
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    
-    return dataloader
+    return TensorDataset(images_tensor)
 
-def train_flow_matching(num_epochs=10, batch_size=128, device="cuda", sigma_min=0.001):
-    # Get dataloader first to determine input dimensions
-    dataloader = get_dataloader(batch_size)
+def train_flow_matching(num_epochs=1000, batch_size=2048, device="cuda", sigma_min=0.001):
+    # Preload dataset to GPU
+    dataset = preload_dataset(device=device)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=False)
+    
+    # Get input dimensions from first batch
     first_batch = next(iter(dataloader))
-    image_shape = first_batch['pixel_values'].shape[1:] # (C, H, W)
+    image_shape = first_batch[0].shape[1:]  # (C, H, W)
     image_dim = torch.prod(torch.tensor(image_shape)).item()
-
-    # Initialize model and move to device
+    
     model = VectorField(image_dim=image_dim).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-
+    optimizer = AdamWScheduleFree(
+        model.parameters(),
+        lr=1e-2,
+        warmup_steps=100
+    )
+    optimizer.train()
+    
+    # Preallocate tensors for efficiency
     for epoch in range(num_epochs):
         total_loss = 0
         for batch in dataloader:
-            x1 = batch['pixel_values'].to(device)
+            x1 = batch[0]
             batch_size = x1.shape[0]
-
-            # Sample random times t ∈ [0,1] 
+            
+            # Sample random times t ∈ [0,1]
             t = torch.rand(batch_size, device=device)
             
             # Sample noise
             x0 = torch.randn_like(x1)
             
-            SIGMA_MAX = 20000
-            # Compute OT interpolation (from section 4.1 of paper)
-            sigma_t = sigma_min + t.reshape(-1, 1, 1, 1) * (SIGMA_MAX - sigma_min)
+            # Compute OT interpolation
+            sigma_t = 1 - (1 - sigma_min) * t.reshape(-1, 1, 1, 1)
             mu_t = t.reshape(-1, 1, 1, 1) * x1
             x_t = sigma_t * x0 + mu_t
             
             # Get vector field prediction
             v_t = model(t, x_t)
             
-            # Flow matching loss (equation 23 in paper)
-            target = x1 / SIGMA_MAX - x0
+            # Flow matching loss
+            target = x1 - (1 - sigma_min) * x0
             loss = torch.mean((v_t - target) ** 2)
             
             optimizer.zero_grad()
@@ -118,10 +130,10 @@ def train_flow_matching(num_epochs=10, batch_size=128, device="cuda", sigma_min=
             optimizer.step()
             
             total_loss += loss.item()
-            
+        
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch}, Average Loss: {avg_loss:.4f}")
-        
+    
     return model
 
 def sample(model, n_samples=128, n_steps=50, image_size=128, device="cuda"):
@@ -150,8 +162,16 @@ if __name__ == "__main__":
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
-
+    
+    # Check available VRAM before training
+    if device == "cuda":
+        print(f"Available VRAM before training: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    
     model = train_flow_matching(device=device)
+
+    # Save model
+    model_state = model.state_dict()
+    torch.save(model_state, "model.safetensors")
     
     os.makedirs("samples", exist_ok=True)
     
@@ -160,3 +180,4 @@ if __name__ == "__main__":
         vutils.save_image(samples, f"samples/samples_{i}.png", nrow=4, padding=2)
     
     print("Samples saved in 'samples' directory")
+    
