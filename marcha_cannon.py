@@ -38,9 +38,9 @@ class ScaleBlock(nn.Module):
         self.norm = nn.LayerNorm(input_dim)
         self.block = nn.Sequential(
             nn.Linear(input_dim + 1, hidden_dim, bias=False),
-            xATGLU(hidden_dim, hidden_dim // 4),
+            xATGLU(hidden_dim, hidden_dim // 4, bias=False),
             nn.Dropout(dropout_rate),
-            xATGLU(hidden_dim // 4, hidden_dim),
+            xATGLU(hidden_dim // 4, hidden_dim, bias=False),
             nn.Dropout(dropout_rate),
             nn.Linear(hidden_dim, input_dim, bias=False)
         )
@@ -118,10 +118,8 @@ def preload_dataset(image_size=256, device="cuda"):
     return TensorDataset(images_tensor)
 
 def train_matcha_flow(num_epochs=5000, initial_batch_sizes=[8, 16, 32, 64, 128], epoch_batch_drop_at=40, device="cuda"):
-    # Preload the dataset
     dataset = preload_dataset(device=device)
     
-    # Initialize model and move to device
     temp_loader = DataLoader(dataset, batch_size=initial_batch_sizes[0], shuffle=True)
     first_batch = next(iter(temp_loader))
     image_shape = first_batch[0].shape[1:] 
@@ -136,26 +134,20 @@ def train_matcha_flow(num_epochs=5000, initial_batch_sizes=[8, 16, 32, 64, 128],
     )
     optimizer.train()
 
-    # Create a mutable list of batch sizes that we'll modify during training
     current_batch_sizes = initial_batch_sizes.copy()
     
-    # Keep track of next drop epoch
     next_drop_epoch = epoch_batch_drop_at
-    # Keep track of multiplier for interval calculation
     interval_multiplier = 2
     
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
         
-        # Remove largest batch size at increasing intervals
+        # Slowly decay batch size in a geometric style so e.g. 40 drop 120 drop etc..
         if epoch > 0 and epoch == next_drop_epoch and len(current_batch_sizes) > 1:
             current_batch_sizes.pop()  # Remove the largest batch size
-            # Calculate next interval: base_interval * current_multiplier
             next_interval = epoch_batch_drop_at * interval_multiplier
-            # Update next drop epoch
             next_drop_epoch += next_interval
-            # Increment multiplier for next time
             interval_multiplier += 1
             
             print(f"\nEpoch {epoch}: Reducing batch size to {current_batch_sizes[-1]}")
@@ -171,6 +163,7 @@ def train_matcha_flow(num_epochs=5000, initial_batch_sizes=[8, 16, 32, 64, 128],
             x1 = batch[0]
             batch_size = x1.shape[0]
             
+            # From flow matching for generative modeling: https://arxiv.org/abs/2210.02747
             # Sample t uniform in [0,1] 
             t = torch.rand(batch_size, 1, 1, 1, device=device)
             
@@ -210,6 +203,7 @@ def train_matcha_flow(num_epochs=5000, initial_batch_sizes=[8, 16, 32, 64, 128],
 def sample(model, n_samples=16, n_steps=50, image_size=256, device="cuda", sigma_min=0.001):
     model.eval()
     
+    # Euler integration for generative flow modeling, notably we're moving forward in time.
     # Start from pure noise (t=0)
     x = torch.randn(n_samples, 3, image_size, image_size, device=device)
 
@@ -236,10 +230,8 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
-    # Train model
     model = train_matcha_flow(device=device, initial_batch_sizes=[8, 16, 32, 64], epoch_batch_drop_at=100)
     
-    # Generate final samples
     for i in range(5):
         samples = sample(model, n_samples=16, device=device)
         vutils.save_image(samples, f"samples/epoch_{epoch}.jpg", nrow=4, padding=2, quality=90)
