@@ -14,7 +14,8 @@ import os
 class xATGLU(nn.Module):
     def __init__(self, input_dim, output_dim, bias=True):
         super().__init__()
-        self.proj = nn.Linear(input_dim, output_dim * 2, bias=bias)  # * 2 because we need two paths
+        # GATE path | VALUE path
+        self.proj = nn.Linear(input_dim, output_dim * 2, bias=bias)
         nn.init.kaiming_normal_(self.proj.weight, nonlinearity='linear')
         
         self.alpha = nn.Parameter(torch.zeros(1))
@@ -25,7 +26,7 @@ class xATGLU(nn.Module):
         projected = self.proj(x)
         gate_path, value_path = projected.chunk(2, dim=-1)
         
-        # Apply arctan gating with expanded range
+        # Apply arctan gating with expanded range via learned alpha -- https://arxiv.org/pdf/2405.20768
         gate = (torch.arctan(gate_path) + self.half_pi) * self.inv_pi
         expanded_gate = gate * (1 + 2 * self.alpha) - self.alpha
         
@@ -48,10 +49,10 @@ class ScaleBlock(nn.Module):
         batch_size = x.shape[0]
         x_flat = x.view(batch_size, -1)
         
-        # Pre-norm
+        # Pre normalize to keep gradients from exploding, they giga die without this
         x_normed = self.norm(x_flat).view(x.shape)
         
-        # Process normalized input with time
+        # Process normalized input wrt time
         t = t.view(batch_size, 1)
         x_t = torch.cat([x_flat, t], dim=-1)
         residual = self.block(x_t).view(x.shape)
