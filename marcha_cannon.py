@@ -35,32 +35,40 @@ class xATGLU(nn.Module):
 class ScaleBlock(nn.Module):
     def __init__(self, input_dim, hidden_dim=512, dropout_rate=0.3):
         super().__init__()
-        self.norm = nn.LayerNorm(input_dim)
+        self.norm = nn.LayerNorm(input_dim + 1)
         self.block = nn.Sequential(
-            nn.Linear(input_dim + 1, hidden_dim, bias=False),
-            xATGLU(hidden_dim, hidden_dim // 4, bias=False),
+            nn.Linear(input_dim + 1, hidden_dim, bias=True),
+            xATGLU(hidden_dim, hidden_dim // 4, bias=True),
             nn.Dropout(dropout_rate),
-            xATGLU(hidden_dim // 4, hidden_dim, bias=False),
+            xATGLU(hidden_dim // 4, hidden_dim, bias=True),
             nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim, input_dim, bias=False)
+            nn.Linear(hidden_dim, input_dim, bias=True)
         )
+        self.norm2 = nn.LayerNorm(input_dim)
 
     def forward(self, x, t):
         batch_size = x.shape[0]
+        original_shape = x.shape
         x_flat = x.view(batch_size, -1)
         
-        # Pre normalize to keep gradients from exploding, they giga die without this
-        x_normed = self.norm(x_flat).view(x.shape)
-        
-        # Process normalized input wrt time
+        # Concat flattened x with time
         t = t.view(batch_size, 1)
         x_t = torch.cat([x_flat, t], dim=-1)
-        residual = self.block(x_t).view(x.shape)
         
-        return x + residual
+        # Normalize entire x_t
+        x_normed = self.norm(x_t)
+        
+        # Actual forward basically
+        residual = self.block(x_normed)
+        
+        # Norm residual
+        residual = self.norm2(residual)
+        
+        # Reshape to original size
+        return (x_flat + residual).view(original_shape)
 
 class MultiScaleVectorField(nn.Module):
-    def __init__(self, input_shape, hidden_dims=[512, 256, 128], dropout_rate=0.1):
+    def __init__(self, input_shape, hidden_dims=[512, 256], dropout_rate=0.1):
         super().__init__()
         self.sigma_min = 1e-3
         C, H, W = input_shape
@@ -117,6 +125,10 @@ def preload_dataset(image_size=256, device="cuda"):
     
     return TensorDataset(images_tensor)
 
+def count_parameters(model):
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f'Total parameters: {total_params:,} ({total_params/1e6:.2f}M)')
+
 def train_matcha_flow(num_epochs=5000, initial_batch_sizes=[8, 16, 32, 64, 128], epoch_batch_drop_at=40, device="cuda"):
     dataset = preload_dataset(device=device)
     
@@ -126,6 +138,7 @@ def train_matcha_flow(num_epochs=5000, initial_batch_sizes=[8, 16, 32, 64, 128],
     image_dim = torch.prod(torch.tensor(image_shape)).item()
     
     model = MultiScaleVectorField(input_shape=image_shape).to(device)
+    count_parameters(model)
     sigma_min = model.sigma_min
     optimizer = AdamWScheduleFree(
         model.parameters(),
