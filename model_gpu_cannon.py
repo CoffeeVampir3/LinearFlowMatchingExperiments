@@ -64,7 +64,7 @@ def preload_dataset(image_size=256, device="cuda"):
     
     return TensorDataset(images_tensor)
 
-def train_flow_matching(num_epochs=500, batch_size=16, device="cuda", sigma_min=0.001):
+def train_flow_matching(num_epochs=5000, batch_size=16, device="cuda", sigma_min=0.001):
     # Preload dataset to GPU
     dataset = preload_dataset(device=device)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=False)
@@ -75,12 +75,14 @@ def train_flow_matching(num_epochs=500, batch_size=16, device="cuda", sigma_min=
     image_dim = torch.prod(torch.tensor(image_shape)).item()
     
     model = VectorField(image_dim=image_dim).to(device)
-    optimizer = AdamWScheduleFree(
-        model.parameters(),
-        lr=1e-3,
-        warmup_steps=100
+    optimizer = AdamW(model.parameters(), lr=0.1)
+
+    scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=100,    # Number of iterations for a complete cosine cycle
+        eta_min=0.0001,     # Minimum learning rate
     )
-    optimizer.train()
+
     
     for epoch in range(num_epochs):
         total_loss = 0
@@ -112,6 +114,7 @@ def train_flow_matching(num_epochs=500, batch_size=16, device="cuda", sigma_min=
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
+            scheduler.step()
         
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch}, Average Loss: {avg_loss:.4f}")
