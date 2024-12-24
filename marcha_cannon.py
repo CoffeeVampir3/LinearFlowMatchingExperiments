@@ -40,18 +40,15 @@ class ScaleBlock(nn.Module):
         # Initial projection
         self.input_proj = nn.Linear(input_dim + 1, hidden_dim, bias=False)
         
-        # First xATGLU block (hidden_dim -> hidden_dim//4)
         self.glu1 = xATGLU(hidden_dim, hidden_dim // 4, bias=False)
         self.dropout1 = nn.Dropout(dropout_rate)
         
-        # Second and third xATGLU blocks (hidden_dim//4 -> hidden_dim//16)
-        # Adding skip connection around these layers
+        # Broken apart to skip connect
         self.glu2 = xATGLU(hidden_dim // 4, hidden_dim // 8, bias=False)
         self.dropout2 = nn.Dropout(dropout_rate)
         self.glu3 = xATGLU(hidden_dim // 8, hidden_dim // 4, bias=False)
         self.dropout3 = nn.Dropout(dropout_rate)
         
-        # Final xATGLU block (hidden_dim//4 -> hidden_dim)
         self.glu4 = xATGLU(hidden_dim // 4, hidden_dim, bias=False)
         self.dropout4 = nn.Dropout(dropout_rate)
         
@@ -98,7 +95,7 @@ class ScaleBlock(nn.Module):
         # Final norm
         x = self.norm2(x)
         
-        # Add residual and reshape
+        # x + Residual
         return (x_flat + x).view(original_shape)
 
 class MultiScaleVectorField(nn.Module):
