@@ -36,16 +36,31 @@ class ScaleBlock(nn.Module):
     def __init__(self, input_dim, hidden_dim=512, dropout_rate=0.3):
         super().__init__()
         self.norm = nn.LayerNorm(input_dim + 1)
-        self.block = nn.Sequential(
-            nn.Linear(input_dim + 1, hidden_dim, bias=True),
-            xATGLU(hidden_dim, hidden_dim // 4, bias=True),
-            nn.Dropout(dropout_rate),
-            xATGLU(hidden_dim // 4, hidden_dim, bias=True),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim, input_dim, bias=True)
-        )
+        
+        # Initial projection
+        self.input_proj = nn.Linear(input_dim + 1, hidden_dim, bias=False)
+        
+        # First xATGLU block (hidden_dim -> hidden_dim//4)
+        self.glu1 = xATGLU(hidden_dim, hidden_dim // 4, bias=False)
+        self.dropout1 = nn.Dropout(dropout_rate)
+        
+        # Second and third xATGLU blocks (hidden_dim//4 -> hidden_dim//16)
+        # Adding skip connection around these layers
+        self.glu2 = xATGLU(hidden_dim // 4, hidden_dim // 8, bias=False)
+        self.dropout2 = nn.Dropout(dropout_rate)
+        self.glu3 = xATGLU(hidden_dim // 8, hidden_dim // 4, bias=False)
+        self.dropout3 = nn.Dropout(dropout_rate)
+        
+        # Final xATGLU block (hidden_dim//4 -> hidden_dim)
+        self.glu4 = xATGLU(hidden_dim // 4, hidden_dim, bias=False)
+        self.dropout4 = nn.Dropout(dropout_rate)
+        
+        # Output projection
+        self.output_proj = nn.Linear(hidden_dim, input_dim, bias=False)
+        
+        # Final norm
         self.norm2 = nn.LayerNorm(input_dim)
-
+        
     def forward(self, x, t):
         batch_size = x.shape[0]
         original_shape = x.shape
@@ -55,20 +70,39 @@ class ScaleBlock(nn.Module):
         t = t.view(batch_size, 1)
         x_t = torch.cat([x_flat, t], dim=-1)
         
-        # Normalize entire x_t
+        # Initial norm and projection
         x_normed = self.norm(x_t)
+        x = self.input_proj(x_normed)
         
-        # Actual forward basically
-        residual = self.block(x_normed)
+        # First xATGLU
+        x = self.glu1(x)
+        x = self.dropout1(x)
         
-        # Norm residual
-        residual = self.norm2(residual)
+        # Save state for skip connection
+        skip_state = x
         
-        # Reshape to original size
-        return (x_flat + residual).view(original_shape)
+        # Second and third xATGLU with skip connection
+        x = self.glu2(x)
+        x = self.dropout2(x)
+        x = self.glu3(x)
+        x = self.dropout3(x)
+        
+        # Project back up and add skip connection
+        x = x + skip_state
+        
+        # Final xATGLU and projection
+        x = self.glu4(x)
+        x = self.dropout4(x)
+        x = self.output_proj(x)
+        
+        # Final norm
+        x = self.norm2(x)
+        
+        # Add residual and reshape
+        return (x_flat + x).view(original_shape)
 
 class MultiScaleVectorField(nn.Module):
-    def __init__(self, input_shape, hidden_dims=[512, 256], dropout_rate=0.1):
+    def __init__(self, input_shape, hidden_dims=[1024, 768, 512, 256], dropout_rate=0.1):
         super().__init__()
         self.sigma_min = 1e-3
         C, H, W = input_shape
@@ -77,7 +111,7 @@ class MultiScaleVectorField(nn.Module):
             ScaleBlock(
                 input_dim=C * (H // (2**i)) * (W // (2**i)),
                 hidden_dim=h_dim,
-                dropout_rate=dropout_rate
+                dropout_rate=0.05
             )
             for i, h_dim in enumerate(hidden_dims)
         ])
@@ -105,7 +139,7 @@ class MultiScaleVectorField(nn.Module):
 def preload_dataset(image_size=256, device="cuda"):
     """Preload and cache the entire dataset in GPU memory"""
     print("Loading and preprocessing dataset...")
-    dataset = load_dataset("jiovine/pixel-art-nouns-2k", split="train")
+    dataset = load_dataset("reach-vb/pokemon-blip-captions", split="train")
     
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -142,7 +176,7 @@ def train_matcha_flow(num_epochs=5000, initial_batch_sizes=[8, 16, 32, 64, 128],
     sigma_min = model.sigma_min
     optimizer = AdamWScheduleFree(
         model.parameters(),
-        lr=1e-3,
+        lr=1e-2,
         warmup_steps=100
     )
     optimizer.train()
