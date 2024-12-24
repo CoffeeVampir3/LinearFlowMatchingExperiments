@@ -1,1 +1,1 @@
-A bunch of linear flow matching experiments using various nonsense. Lots of this code is bad and just quick prototyping, likely much of it contains errors. The purpose of this repo is just to catalog "simple" flow matching experimental networks.
+A bunch of linear flow matching experiments using various nonsense. Lots of this code is bad and just quick prototyping, likely much of it contains errors. The purpose of this repo is just to catalog "simple" flow matching experimental networks and should provide a jumping off point for more serious implementations.
